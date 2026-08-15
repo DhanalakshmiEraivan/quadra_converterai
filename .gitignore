@@ -33,6 +33,7 @@ build/
 .env.production.local
 .env.test
 .env.test.local
+.env.*.local
 
 *.log
 
