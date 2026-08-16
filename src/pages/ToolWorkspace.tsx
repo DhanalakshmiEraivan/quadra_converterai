@@ -29,7 +29,7 @@ import * as Icons from 'lucide-react';
 import type { Tool, ToolOption } from '@/data/tools';
 import * as Converters from '@/lib/converters';
 import * as PDFConverters from '@/lib/pdf-converters';
-import { consumeConversion, refundConversion } from '@/lib/usage';
+import { canUseConversion, consumeConversion, refundConversion } from '@/lib/usage';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/lib/auth';
 
@@ -120,401 +120,651 @@ export function ToolWorkspace({ tool, navigate }: Props) {
    * ---------------------------------------------------------
    */
 
-const runConversion = async (files?: File[]) => {
-  const useFiles =
-    files && files.length > 0
-      ? files
-      : storedFiles;
+  const runConversion = async (files?: File[]) => {
+    const useFiles =
+      files && files.length > 0 ? files : storedFiles;
 
-  if (
-    (
-      tool.inputType === 'file' ||
-      tool.inputType === 'multi-file' ||
-      tool.inputType === 'file-options'
-    ) &&
-    useFiles.length === 0
-  ) {
-    setError('Please upload a file first.');
-    setStage('error');
-    return;
-  }
+    /*
+     * Check usage INSIDE the async function.
+     *
+     * This fixes the original error:
+     *
+     * "await expressions are only allowed..."
+     */
 
-  if (stage === 'working') {
-    return;
-  }
+    try {
+      const usage = await canUseConversion();
 
-  let usageReserved = false;
+      if (!usage.allowed) {
+        setError(
+          'You have used all 5 free conversions. Please upgrade to continue.'
+        );
 
-  /*
-   * ----------------------------------------------------------
-   * RESERVE CONVERSION CREDIT
-   * ----------------------------------------------------------
-   */
+        setStage('error');
+        return;
+      }
+    } catch (usageError) {
+      console.error('Usage check failed:', usageError);
 
-  try {
-    const reservation = await consumeConversion();
-
-    if (!reservation.allowed) {
       setError(
-        reservation.message ||
-          'You have used all 5 free conversions for today. Please upgrade to continue.'
+        usageError instanceof Error
+          ? usageError.message
+          : 'Unable to check your conversion usage.'
       );
 
       setStage('error');
       return;
     }
 
-    usageReserved = !reservation.unlimited;
-  } catch (usageError) {
-    console.error(
-      'Conversion credit reservation failed:',
-      usageError
-    );
-
-    setError(
-      usageError instanceof Error
-        ? usageError.message
-        : 'Unable to reserve a conversion credit.'
-    );
-
-    setStage('error');
-    return;
-  }
-
-  /*
-   * ----------------------------------------------------------
-   * START CONVERSION
-   * ----------------------------------------------------------
-   */
-
-  setStage('working');
-  setError(null);
-  setProgress(5);
-  setResults([]);
-
-  try {
-    const opts =
-      options as Record<
-        string,
-        string | number | boolean
-      >;
-
-    let output:
-      | Converters.ConvertResult
-      | Converters.ConvertResult[]
-      | null = null;
-
-    const file =
-      useFiles[0];
-
     /*
-     * --------------------------------------------------------
-     * FILE CONVERTERS
-     * --------------------------------------------------------
+     * Validate files
      */
 
     if (
-      tool.inputType === 'file' ||
-      tool.inputType === 'file-options'
+      (
+        tool.inputType === 'file' ||
+        tool.inputType === 'multi-file' ||
+        tool.inputType === 'file-options'
+      ) &&
+      useFiles.length === 0
     ) {
-      if (!file) {
-        throw new Error(
-          'Please upload a file first.'
-        );
-      }
+      setError('Please upload a file first.');
+      setStage('error');
+      return;
+    }
+
+    let usageReserved = false;
+    try {
+      const reservation = await consumeConversion();
+      if (!reservation?.allowed) { setError("You have reached today's 5 free conversions. Upgrade with UPI to continue."); setStage('error'); return; }
+      usageReserved = !reservation?.unlimited;
+    } catch (usageError) { setError(usageError instanceof Error ? usageError.message : 'Unable to reserve a conversion credit.'); setStage('error'); return; }
+
+    /*
+     * Start conversion
+     */
+
+    setStage('working');
+    setError(null);
+    setProgress(5);
+
+    try {
+      let output:
+        | Converters.ConvertResult
+        | Converters.ConvertResult[]
+        | null = null;
+
+      const opts =
+        options as Record<string, string | number | boolean>;
+
+      /*
+       * -------------------------------------------------------
+       * CONVERTERS
+       * -------------------------------------------------------
+       */
 
       switch (tool.engine) {
-
-        /*
-         * IMAGE
-         */
-
         case 'imageToImage':
-          output =
-            await Converters.imageToImage(
-              file,
-              String(
-                opts.targetFormat ||
-                  tool.outputFormat ||
-                  'png'
-              )
-            );
+          output = await Converters.imageToImage(
+            useFiles[0],
+            String(opts.targetFormat)
+          );
           break;
 
         case 'imageToPDF':
-          output =
-            await Converters.imageToPDF(
-              file
-            );
+          output = await Converters.imageToPDF(useFiles[0]);
           break;
 
         case 'imageCompress':
-          output =
-            await Converters.imageCompress(
-              file,
-              {
-                mode:
-                  String(
-                    opts.mode ||
-                      'target-size'
-                  ) as
-                    | 'target-size'
-                    | 'quality'
-                    | 'balanced',
+          output = await Converters.imageCompress(
+            useFiles[0],
+            {
+              mode: String(
+                opts.mode || 'target-size'
+              ) as
+                | 'target-size'
+                | 'quality'
+                | 'balanced',
 
-                targetSize:
-                  Number(
-                    opts.targetSize || 200
-                  ),
+              targetSize: Number(
+                opts.targetSize || 200
+              ),
 
-                targetUnit:
-                  String(
-                    opts.targetUnit ||
-                      'KB'
-                  ) as 'KB' | 'MB',
+              targetUnit: String(
+                opts.targetUnit || 'KB'
+              ) as 'KB' | 'MB',
 
-                quality:
-                  Number(
-                    opts.quality || 85
-                  ),
+              quality: Number(
+                opts.quality || 85
+              ),
 
-                format:
-                  String(
-                    opts.format ||
-                      'auto'
-                  ) as
-                    | 'auto'
-                    | 'jpg'
-                    | 'webp'
-                    | 'png',
+              format: String(
+                opts.format || 'auto'
+              ) as
+                | 'auto'
+                | 'jpg'
+                | 'webp'
+                | 'png',
 
-                preserveDimensions:
-                  Boolean(
-                    opts.preserveDimensions
-                  ),
-              }
-            );
+              preserveDimensions: Boolean(
+                opts.preserveDimensions
+              ),
+            }
+          );
           break;
 
         case 'imageResize':
-          output =
-            await Converters.imageResize(
-              file,
-              {
-                mode:
-                  String(
-                    opts.mode ||
-                      'dimensions'
-                  ) as
-                    | 'dimensions'
-                    | 'percentage'
-                    | 'long-edge',
+          output = await Converters.imageResize(
+            useFiles[0],
+            {
+              mode: String(
+                opts.mode || 'dimensions'
+              ) as
+                | 'dimensions'
+                | 'percentage'
+                | 'long-edge',
 
-                width:
-                  Number(
-                    opts.width || 1080
-                  ),
+              width: Number(
+                opts.width || 1080
+              ),
 
-                height:
-                  Number(
-                    opts.height || 1080
-                  ),
+              height: Number(
+                opts.height || 1080
+              ),
 
-                percentage:
-                  Number(
-                    opts.percentage || 50
-                  ),
+              percentage: Number(
+                opts.percentage || 50
+              ),
 
-                longEdge:
-                  Number(
-                    opts.longEdge || 1200
-                  ),
+              longEdge: Number(
+                opts.longEdge || 1200
+              ),
 
-                fitMode:
-                  String(
-                    opts.fitMode ||
-                      'fit'
-                  ) as
-                    | 'fit'
-                    | 'fill'
-                    | 'stretch',
+              fitMode: String(
+                opts.fitMode || 'fit'
+              ) as 'fit' | 'fill' | 'stretch',
 
-                preserveAspectRatio:
-                  Boolean(
-                    opts.preserveAspectRatio
-                  ),
-              }
-            );
+              preserveAspectRatio: Boolean(
+                opts.preserveAspectRatio
+              ),
+            }
+          );
           break;
 
         case 'imageRotate':
-          output =
-            await Converters.imageRotate(
-              file,
-              {
-                degrees:
-                  Number(
-                    opts.degrees || 90
-                  ),
+          output = await Converters.imageRotate(
+            useFiles[0],
+            {
+              degrees: Number(
+                opts.degrees || 90
+              ),
 
-                direction:
-                  String(
-                    opts.direction ||
-                      'clockwise'
-                  ) as
-                    | 'clockwise'
-                    | 'counterclockwise',
+              direction: String(
+                opts.direction || 'clockwise'
+              ) as
+                | 'clockwise'
+                | 'counterclockwise',
 
-                expand:
-                  Boolean(
-                    opts.expand
-                  ),
-              }
-            );
+              expand: Boolean(opts.expand),
+            }
+          );
           break;
 
         case 'imageGrayscale':
-          output =
-            await Converters.imageGrayscale(
-              file
-            );
+          output = await Converters.imageGrayscale(
+            useFiles[0]
+          );
           break;
 
         case 'imageFlip':
-          output =
-            await Converters.imageFlip(
-              file,
-              String(
-                opts.axis || 'h'
-              ) as 'h' | 'v'
-            );
+          output = await Converters.imageFlip(
+            useFiles[0],
+            String(opts.axis) as 'h' | 'v'
+          );
           break;
 
         case 'imageToBase64':
-          output =
-            await Converters.imageToBase64(
-              file
-            );
+          output = await Converters.imageToBase64(
+            useFiles[0]
+          );
           break;
 
         case 'imageCropToSquare':
-          output =
-            await Converters.imageCropToSquare(
-              file,
-              {
-                position:
-                  String(
-                    opts.position ||
-                      'center'
-                  ) as
-                    | 'center'
-                    | 'top'
-                    | 'bottom'
-                    | 'left'
-                    | 'right',
+          output = await Converters.imageCropToSquare(
+            useFiles[0],
+            {
+              position: String(
+                opts.position || 'center'
+              ) as
+                | 'center'
+                | 'top'
+                | 'bottom'
+                | 'left'
+                | 'right',
 
-                size:
-                  Number(
-                    opts.size || 1080
-                  ),
+              size: Number(
+                opts.size || 1080
+              ),
+            }
+          );
+          break;
+
+        case 'pdfToImages':
+          output = await Converters.pdfToImages(
+            useFiles[0],
+            String(opts.pageRange || 'all')
+          );
+          break;
+
+        case 'imagesToPDF':
+          output = await Converters.imagesToPDF(
+            useFiles
+          );
+          break;
+
+        case 'mergePDFs':
+          output = await Converters.mergePDFs(
+            useFiles
+          );
+          break;
+
+        case 'splitPDF':
+          output = await Converters.splitPDF(
+            useFiles[0],
+            String(opts.splitPoints || '')
+          );
+          break;
+
+        case 'textToPDF':
+          output = await Converters.textToPDF(
+            String(opts.text || ''),
+            'text'
+          );
+          break;
+
+        case 'htmlToPDF':
+          output = await Converters.htmlToPDF(
+            String(opts.text || ''),
+            'html'
+          );
+          break;
+
+        /*
+         * -------------------------------------------------------
+         * TEXT
+         * -------------------------------------------------------
+         */
+
+        case 'textCaseConvert':
+          output = await Converters.textCaseConvert(
+            String(opts.text || ''),
+            String(opts.mode)
+          );
+          break;
+
+        case 'textToBase64':
+          output = await Converters.textToBase64(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'base64ToText':
+          output = await Converters.base64ToText(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textToBinary':
+          output = await Converters.textToBinary(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'binaryToText':
+          output = await Converters.binaryToText(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textToHex':
+          output = await Converters.textToHex(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'hexToText':
+          output = await Converters.hexToText(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textToMorse':
+          output = await Converters.textToMorse(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'morseToText':
+          output = await Converters.morseToText(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textToLeet':
+          output = await Converters.textToLeet(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textRemoveDuplicates':
+          output =
+            await Converters.textRemoveDuplicates(
+              String(opts.text || '')
+            );
+          break;
+
+        case 'textWordCount':
+          output = await Converters.textWordCount(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textSortLines':
+          output = await Converters.textSortLines(
+            String(opts.text || ''),
+            String(opts.mode)
+          );
+          break;
+
+        case 'textTrimLines':
+          output = await Converters.textTrimLines(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textAddLineNumbers':
+          output =
+            await Converters.textAddLineNumbers(
+              String(opts.text || '')
+            );
+          break;
+
+        case 'textSlugify':
+          output = await Converters.textSlugify(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'textLoremIpsum':
+          output =
+            await Converters.textLoremIpsum(
+              Number(opts.paragraphs || 3)
+            );
+          break;
+
+        /*
+         * -------------------------------------------------------
+         * JSON
+         * -------------------------------------------------------
+         */
+
+        case 'jsonBeautify':
+          output = await Converters.jsonBeautify(
+            String(opts.json || '{}'),
+            Number(opts.indent)
+          );
+          break;
+
+        case 'jsonMinify':
+          output = await Converters.jsonMinify(
+            String(opts.json || '{}')
+          );
+          break;
+
+        case 'jsonToCSV':
+          output = await Converters.jsonToCSV(
+            String(opts.json || '[]')
+          );
+          break;
+
+        case 'csvToJSON':
+          output = await Converters.csvToJSON(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'jsonToYAML':
+          output = await Converters.jsonToYAML(
+            String(opts.json || '{}')
+          );
+          break;
+
+        /*
+         * -------------------------------------------------------
+         * ENCODING / WEB
+         * -------------------------------------------------------
+         */
+
+        case 'urlEncode':
+          output = await Converters.urlEncode(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'urlDecode':
+          output = await Converters.urlDecode(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'htmlEncode':
+          output = await Converters.htmlEncode(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'htmlDecode':
+          output = await Converters.htmlDecode(
+            String(opts.text || '')
+          );
+          break;
+
+        case 'htmlToMarkdown':
+          output =
+            await Converters.htmlToMarkdown(
+              String(opts.text || '')
+            );
+          break;
+
+        case 'markdownToHTML':
+          output =
+            await Converters.markdownToHTML(
+              String(opts.text || '')
+            );
+          break;
+
+        /*
+         * -------------------------------------------------------
+         * GENERATORS
+         * -------------------------------------------------------
+         */
+
+        case 'generateQRCode':
+          output =
+            await Converters.generateQRCode(
+              String(opts.text || 'https://'),
+              Number(opts.size || 300)
+            );
+          break;
+
+        case 'generateQRCodeSVG':
+          output =
+            await Converters.generateQRCodeSVG(
+              String(opts.text || 'https://')
+            );
+          break;
+
+        case 'colorConverter':
+          output =
+            await Converters.colorConverter(
+              String(opts.text || '#3478f6')
+            );
+          break;
+
+        case 'generateHash':
+          output =
+            await Converters.generateHash(
+              String(opts.text || ''),
+              String(opts.algorithm)
+            );
+          break;
+
+        case 'generateUUID':
+          output =
+            await Converters.generateUUID();
+          break;
+
+        case 'generatePassword':
+          output =
+            await Converters.generatePassword(
+              Number(opts.length || 16),
+              {
+                upper: Boolean(opts.upper),
+                lower: Boolean(opts.lower),
+                numbers: Boolean(opts.numbers),
+                symbols: Boolean(opts.symbols),
               }
             );
           break;
 
         /*
-         * ----------------------------------------------------
-         * PDF CLIENT-SIDE
-         * ----------------------------------------------------
+         * -------------------------------------------------------
+         * CALCULATORS
+         * -------------------------------------------------------
          */
 
-        case 'pdfToImages':
+        case 'calculatePercentage':
           output =
-            await Converters.pdfToImages(
-              file,
+            await Converters.calculatePercentage(
+              String(opts.value || '0'),
+              String(opts.total || '100')
+            );
+          break;
+
+        case 'calculateBMI':
+          output =
+            await Converters.calculateBMI(
+              String(opts.weight || '70'),
+              String(opts.height || '175')
+            );
+          break;
+
+        case 'calculateAge':
+          output =
+            await Converters.calculateAge(
               String(
-                opts.pageRange || 'all'
+                opts.birthDate || '2000-01-01'
               )
             );
           break;
 
-        case 'splitPDF':
+        case 'calculateLoan':
           output =
-            await PDFConverters.splitPDF(
-              file,
-              String(
-                opts.splitPoints || ''
-              )
+            await Converters.calculateLoan(
+              String(opts.principal || '10000'),
+              String(opts.rate || '5'),
+              String(opts.years || '5')
             );
           break;
+
+        case 'calculateUnit':
+          output =
+            await Converters.calculateUnit(
+              String(opts.value || '1'),
+              String(opts.from),
+              String(opts.to),
+              String(opts.type)
+            );
+          break;
+
+        case 'calculateTimezones':
+          output =
+            await Converters.calculateTimezones(
+              String(opts.timezone || 'UTC')
+            );
+          break;
+
+        /*
+         * -------------------------------------------------------
+         * PDF
+         * -------------------------------------------------------
+         */
 
         case 'pdfRemovePages':
           output =
             await PDFConverters.removePages(
-              file,
-              String(
-                opts.pageRange || '1'
-              )
+              useFiles[0],
+              String(opts.pageRange || '')
             );
           break;
 
         case 'pdfExtractPages':
           output =
             await PDFConverters.extractPages(
-              file,
-              String(
-                opts.pageRange || '1'
-              )
+              useFiles[0],
+              String(opts.pageRange || '')
             );
           break;
 
         case 'pdfOrganize':
           output =
             await PDFConverters.organizePDF(
-              file,
-              String(
-                opts.pageOrder || '1'
-              )
+              useFiles[0],
+              String(opts.pageOrder || '')
+            );
+          break;
+
+        case 'pdfScanToPDF':
+          output =
+            await PDFConverters.scanToPDF(
+              useFiles
             );
           break;
 
         case 'pdfOptimize':
           output =
             await PDFConverters.optimizePDF(
-              file
+              useFiles[0]
             );
           break;
 
         case 'pdfCompress':
           output =
             await PDFConverters.compressPDF(
-              file,
-              Number(
-                opts.quality || 60
-              )
+              useFiles[0],
+              Number(opts.quality)
             );
           break;
 
         case 'pdfRepair':
           output =
             await PDFConverters.repairPDF(
-              file
+              useFiles[0]
             );
           break;
 
         case 'pdfOCR':
           output =
             await PDFConverters.ocrPDF(
-              file,
-              String(
-                opts.language || 'eng'
-              )
+              useFiles[0],
+              String(opts.language || '')
             );
           break;
 
         case 'pdfConvertTo':
           output =
             await PDFConverters.convertToPDF(
-              file
+              useFiles[0]
             );
           break;
 
@@ -525,200 +775,142 @@ const runConversion = async (files?: File[]) => {
             );
           break;
 
-        /*
-         * ----------------------------------------------------
-         * IMPORTANT SERVER-BACKED CONVERSIONS
-         * ----------------------------------------------------
-         */
-
         case 'pdfWordToPDF':
           output =
             await PDFConverters.wordToPDF(
-              file
+              useFiles[0]
             );
           break;
 
         case 'pdfPptxToPDF':
           output =
             await PDFConverters.pptxToPDF(
-              file
+              useFiles[0]
             );
           break;
 
         case 'pdfExcelToPDF':
           output =
             await PDFConverters.excelToPDF(
-              file
+              useFiles[0]
             );
           break;
 
         case 'pdfHtmlFileToPDF':
           output =
             await PDFConverters.htmlToPDFFile(
-              file
+              useFiles[0]
             );
           break;
-
-        /*
-         * ----------------------------------------------------
-         * PDF → WORD
-         * ----------------------------------------------------
-         */
-
-        case 'pdfToWord':
-          output =
-            await PDFConverters.pdfToWord(
-              file
-            );
-          break;
-
-        /*
-         * ----------------------------------------------------
-         * PDF → POWERPOINT
-         * ----------------------------------------------------
-         */
-
-        case 'pdfToPPTX':
-          output =
-            await PDFConverters.pdfToPPTX(
-              file
-            );
-          break;
-
-        /*
-         * ----------------------------------------------------
-         * PDF → EXCEL
-         * ----------------------------------------------------
-         */
-
-        case 'pdfToExcel':
-          output =
-            await PDFConverters.pdfToExcel(
-              file
-            );
-          break;
-
-        /*
-         * ----------------------------------------------------
-         * PDF → PDF/A
-         * ----------------------------------------------------
-         */
-
-        case 'pdfToPDFA':
-          output =
-            await PDFConverters.pdfToPDFA(
-              file
-            );
-          break;
-
-        /*
-         * ----------------------------------------------------
-         * OTHER PDF TOOLS
-         * ----------------------------------------------------
-         */
 
         case 'pdfToJPG':
           output =
             await PDFConverters.pdfToJPG(
-              file,
-              Number(
-                opts.quality || 80
-              ),
+              useFiles[0],
+              Number(opts.quality),
               String(
                 opts.pageRange || 'all'
               )
             );
           break;
 
+        case 'pdfToWord':
+          output =
+            await PDFConverters.pdfToWord(
+              useFiles[0]
+            );
+          break;
+
+        case 'pdfToPPTX':
+          output =
+            await PDFConverters.pdfToPPTX(
+              useFiles[0]
+            );
+          break;
+
+        case 'pdfToExcel':
+          output =
+            await PDFConverters.pdfToExcel(
+              useFiles[0]
+            );
+          break;
+
+        case 'pdfToPDFA':
+          output =
+            await PDFConverters.pdfToPDFA(
+              useFiles[0]
+            );
+          break;
+
         case 'pdfRotate':
           output =
             await PDFConverters.rotatePDF(
-              file,
-              Number(
-                opts.rotationDegrees ||
-                  90
-              )
+              useFiles[0],
+              Number(opts.degrees)
             );
           break;
 
         case 'pdfAddPageNumbers':
           output =
             await PDFConverters.addPageNumbers(
-              file,
-              String(
-                opts.position ||
-                  'center'
-              )
+              useFiles[0],
+              String(opts.position || '')
             );
           break;
 
         case 'pdfAddWatermark':
           output =
             await PDFConverters.addWatermark(
-              file,
-              String(
-                opts.text || 'QuadraConverter'
-              ),
-              Number(
-                opts.opacity || 30
-              ) / 100
+              useFiles[0],
+              String(opts.text || ''),
+              Number(opts.opacity)
             );
           break;
 
         case 'pdfCrop':
           output =
             await PDFConverters.cropPDF(
-              file,
-              Number(
-                opts.margin || 10
-              )
+              useFiles[0],
+              Number(opts.margin)
             );
           break;
 
         case 'pdfFlatten':
           output =
             await PDFConverters.flattenPDF(
-              file
+              useFiles[0]
             );
           break;
 
         case 'pdfUnlock':
           output =
             await PDFConverters.unlockPDF(
-              file,
-              String(
-                opts.password || ''
-              )
+              useFiles[0],
+              String(opts.password || '')
             );
           break;
 
         case 'pdfProtect':
           output =
             await PDFConverters.protectPDF(
-              file,
-              String(
-                opts.password || ''
-              )
+              useFiles[0],
+              String(opts.password || '')
             );
           break;
 
         case 'pdfSign':
           output =
             await PDFConverters.signPDF(
-              file,
-              String(
-                opts.name || ''
-              )
+              useFiles[0],
+              String(opts.name || '')
             );
           break;
 
         case 'pdfRedact':
           output =
             await PDFConverters.redactPDF(
-              file,
-              String(
-                opts.searchText || ''
-              )
+              useFiles[0],
+              String(opts.searchText || '')
             );
           break;
 
@@ -739,665 +931,172 @@ const runConversion = async (files?: File[]) => {
         case 'pdfSummarize':
           output =
             await PDFConverters.summarizePDF(
-              file,
-              Number(
-                opts.ratio || 30
-              )
+              useFiles[0],
+              Number(opts.ratio)
             );
           break;
 
         case 'pdfTranslate':
           output =
             await PDFConverters.translatePDF(
-              file,
-              String(
-                opts.targetLang ||
-                  'en'
-              )
+              useFiles[0],
+              String(opts.targetLang || '')
             );
           break;
 
         case 'pdfToMarkdown':
           output =
             await PDFConverters.pdfToMarkdown(
-              file
+              useFiles[0]
             );
           break;
 
         default:
-          throw new Error(`Unsupported file conversion engine: ${tool.engine}`);
+          throw new Error(
+            `Unknown engine: ${tool.engine}`
+          );
       }
-    }
 
-    /*
-     * --------------------------------------------------------
-     * MULTI-FILE CONVERTERS
-     * --------------------------------------------------------
-     */
+      /*
+       * Make sure converter returned something.
+       */
 
-    if (
-      !output &&
-      tool.inputType === 'multi-file'
-    ) {
-      switch (tool.engine) {
-
-        case 'imagesToPDF':
-          output =
-            await Converters.imagesToPDF(
-              useFiles
-            );
-          break;
-
-        case 'mergePDFs':
-          output =
-            await PDFConverters.mergePDFs(
-              useFiles
-            );
-          break;
-
-        case 'pdfScanToPDF':
-          output =
-            await PDFConverters.scanToPDF(
-              useFiles
-            );
-          break;
-
-        case 'pdfJpgToPDF':
-          output =
-            await PDFConverters.jpgToPDF(
-              useFiles
-            );
-          break;
-
-        default:
-          throw new Error(`Unsupported multi-file conversion engine: ${tool.engine}`);
-      }
-    }
-
-    /*
-     * --------------------------------------------------------
-     * TEXT / OPTION-ONLY CONVERTERS
-     * --------------------------------------------------------
-     */
-
-    if (
-      !output &&
-      (
-        tool.inputType === 'text' ||
-        tool.inputType === 'none'
-      )
-    ) {
-      const text =
-        String(
-          opts.text ||
-            opts.json ||
-            opts.csv ||
-            ''
+      if (!output) {
+        throw new Error(
+          'The converter did not return a result.'
         );
-
-      switch (tool.engine) {
-
-        case 'textToPDF':
-          output =
-            await Converters.textToPDF(
-              text,
-              'converted.pdf'
-            );
-          break;
-
-        case 'htmlToPDF':
-          output =
-            await Converters.htmlToPDF(
-              String(
-                opts.text || ''
-              ),
-              'converted.pdf'
-            );
-          break;
-
-        case 'textCaseConvert':
-          output =
-            await Converters.textCaseConvert(
-              text,
-              String(
-                opts.mode || 'upper'
-              )
-            );
-          break;
-
-        case 'textToBase64':
-          output =
-            await Converters.textToBase64(
-              text
-            );
-          break;
-
-        case 'base64ToText':
-          output =
-            await Converters.base64ToText(
-              text
-            );
-          break;
-
-        case 'textToBinary':
-          output =
-            await Converters.textToBinary(
-              text
-            );
-          break;
-
-        case 'binaryToText':
-          output =
-            await Converters.binaryToText(
-              text
-            );
-          break;
-
-        case 'textToHex':
-          output =
-            await Converters.textToHex(
-              text
-            );
-          break;
-
-        case 'hexToText':
-          output =
-            await Converters.hexToText(
-              text
-            );
-          break;
-
-        case 'textToMorse':
-          output =
-            await Converters.textToMorse(
-              text
-            );
-          break;
-
-        case 'morseToText':
-          output =
-            await Converters.morseToText(
-              text
-            );
-          break;
-
-        case 'textToLeet':
-          output =
-            await Converters.textToLeet(
-              text
-            );
-          break;
-
-        case 'textRemoveDuplicates':
-          output =
-            await Converters.textRemoveDuplicates(
-              text
-            );
-          break;
-
-        case 'textWordCount':
-          output =
-            await Converters.textWordCount(
-              text
-            );
-          break;
-
-        case 'textFindReplace':
-          output =
-            await Converters.textFindReplace(
-              text,
-              String(
-                opts.find || ''
-              ),
-              String(
-                opts.replace || ''
-              )
-            );
-          break;
-
-        case 'textSortLines':
-          output =
-            await Converters.textSortLines(
-              text,
-              String(
-                opts.mode || 'asc'
-              )
-            );
-          break;
-
-        case 'textTrimLines':
-          output =
-            await Converters.textTrimLines(
-              text
-            );
-          break;
-
-        case 'textAddLineNumbers':
-          output =
-            await Converters.textAddLineNumbers(
-              text
-            );
-          break;
-
-        case 'textSlugify':
-          output =
-            await Converters.textSlugify(
-              text
-            );
-          break;
-
-        case 'textLoremIpsum':
-          output =
-            await Converters.textLoremIpsum(
-              Number(
-                opts.paragraphs || 3
-              )
-            );
-          break;
-
-        case 'jsonBeautify':
-          output =
-            await Converters.jsonBeautify(
-              String(
-                opts.json || ''
-              ),
-              Number(
-                opts.indent || 2
-              )
-            );
-          break;
-
-        case 'jsonMinify':
-          output =
-            await Converters.jsonMinify(
-              String(
-                opts.json || ''
-              )
-            );
-          break;
-
-        case 'jsonToCSV':
-          output =
-            await Converters.jsonToCSV(
-              String(
-                opts.json || ''
-              )
-            );
-          break;
-
-        case 'csvToJSON':
-          output =
-            await Converters.csvToJSON(
-              String(
-                opts.text || ''
-              )
-            );
-          break;
-
-        case 'jsonToYAML':
-          output =
-            await Converters.jsonToYAML(
-              String(
-                opts.json || ''
-              )
-            );
-          break;
-
-        case 'urlEncode':
-          output =
-            await Converters.urlEncode(
-              text
-            );
-          break;
-
-        case 'urlDecode':
-          output =
-            await Converters.urlDecode(
-              text
-            );
-          break;
-
-        case 'htmlEncode':
-          output =
-            await Converters.htmlEncode(
-              text
-            );
-          break;
-
-        case 'htmlDecode':
-          output =
-            await Converters.htmlDecode(
-              text
-            );
-          break;
-
-        case 'htmlToMarkdown':
-          output =
-            await Converters.htmlToMarkdown(
-              text
-            );
-          break;
-
-        case 'markdownToHTML':
-          output =
-            await Converters.markdownToHTML(
-              text
-            );
-          break;
-
-        case 'generateQRCode':
-          output =
-            await Converters.generateQRCode(
-              text,
-              Number(
-                opts.size || 256
-              )
-            );
-          break;
-
-        case 'generateQRCodeSVG':
-          output =
-            await Converters.generateQRCodeSVG(
-              text
-            );
-          break;
-
-        case 'colorConverter':
-          output =
-            await Converters.colorConverter(
-              text
-            );
-          break;
-
-        case 'generateHash':
-          output =
-            await Converters.generateHash(
-              text,
-              String(
-                opts.algorithm ||
-                  'SHA-256'
-              )
-            );
-          break;
-
-        case 'generateUUID':
-          output =
-            await Converters.generateUUID();
-          break;
-
-        case 'generatePassword':
-          output =
-            await Converters.generatePassword(
-              Number(
-                opts.length || 16
-              ),
-              {
-                upper:
-                  Boolean(
-                    opts.upper
-                  ),
-                lower:
-                  Boolean(
-                    opts.lower
-                  ),
-                numbers:
-                  Boolean(
-                    opts.numbers
-                  ),
-                symbols:
-                  Boolean(
-                    opts.symbols
-                  ),
-              }
-            );
-          break;
-
-        case 'calculatePercentage':
-          output =
-            await Converters.calculatePercentage(
-              String(
-                opts.value || ''
-              ),
-              String(
-                opts.total || ''
-              )
-            );
-          break;
-
-        case 'calculateBMI':
-          output =
-            await Converters.calculateBMI(
-              String(
-                opts.weight || ''
-              ),
-              String(
-                opts.height || ''
-              )
-            );
-          break;
-
-        case 'calculateAge':
-          output =
-            await Converters.calculateAge(
-              String(
-                opts.birthDate || ''
-              )
-            );
-          break;
-
-        case 'calculateLoan':
-          output =
-            await Converters.calculateLoan(
-              String(
-                opts.principal || ''
-              ),
-              String(
-                opts.rate || ''
-              ),
-              String(
-                opts.years || ''
-              )
-            );
-          break;
-
-        case 'calculateUnit':
-          output =
-            await Converters.calculateUnit(
-              String(
-                opts.value || ''
-              ),
-              String(
-                opts.from || ''
-              ),
-              String(
-                opts.to || ''
-              ),
-              String(
-                opts.type || 'length'
-              )
-            );
-          break;
-
-        case 'calculateTimezones':
-          output =
-            await Converters.calculateTimezones(
-              String(
-                opts.timezone ||
-                  'America/New_York'
-              )
-            );
-          break;
-
-        default:
-          break;
       }
-    }
 
-    /*
-     * --------------------------------------------------------
-     * FINAL VALIDATION
-     * --------------------------------------------------------
-     */
-
-    if (!output) {
-      throw new Error(
-        `No converter implementation found for engine: ${tool.engine}`
-      );
-    }
-
-    const resultArr =
-      Array.isArray(output)
+      const resultArr = Array.isArray(output)
         ? output
         : [output];
 
-    if (
-      resultArr.length === 0 ||
-      resultArr.some(
-        (result) =>
-          !result ||
-          !result.blob ||
-          result.blob.size === 0
-      )
-    ) {
-      throw new Error(
-        'The converter returned an empty result.'
+      if (resultArr.length === 0) {
+        throw new Error(
+          'No conversion result was generated.'
+        );
+      }
+
+      setProgress(100);
+      setResults(resultArr);
+
+      /*
+       * Log successful conversion.
+       */
+
+      if (user) {
+        const firstResult = resultArr[0];
+
+        const { error: insertError } =
+          await supabase
+            .from('conversions')
+            .insert({
+              tool_id: tool.id,
+              tool_name: tool.name,
+              category: tool.category,
+              input_name:
+                useFiles.length > 0
+                  ? useFiles[0].name
+                  : 'text-input',
+              output_name:
+                firstResult?.filename || '',
+              output_format:
+                tool.outputFormat,
+              status: 'completed',
+              file_size:
+                firstResult?.blob.size ?? null,
+            });
+
+        if (insertError) {
+          console.error(
+            'Failed to save conversion history:',
+            insertError
+          );
+        }
+      }
+
+      setTimeout(() => {
+        setStage('done');
+      }, 300);
+    } catch (err: unknown) {
+      console.error(
+        'Conversion error:',
+        err
       );
-    }
 
-    setProgress(100);
-    setResults(resultArr);
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Conversion failed';
 
-    /*
-     * --------------------------------------------------------
-     * SAVE SUCCESS HISTORY
-     * --------------------------------------------------------
-     */
+      setError(message);
+      setStage('error');
 
-    if (user) {
-      const firstResult =
-        resultArr[0];
+      if (usageReserved) { try { await refundConversion(); } catch (refundError) { console.error('Failed to refund reserved conversion:', refundError); } }
 
-      const {
-        error: insertError,
-      } = await supabase
-        .from('conversions')
-        .insert({
-          tool_id: tool.id,
-          tool_name: tool.name,
-          category: tool.category,
-          input_name:
-            useFiles.length > 0
-              ? useFiles[0].name
-              : 'text-input',
-          output_name:
-            firstResult?.filename || '',
-          output_format:
-            tool.outputFormat,
-          status: 'completed',
-          file_size:
-            firstResult?.blob.size ?? null,
-        });
+      /*
+       * Log failed conversion.
+       */
 
-      if (insertError) {
-        console.error(
-          'Failed to save conversion history:',
-          insertError
-        );
+      if (user) {
+        const { error: insertError } =
+          await supabase
+            .from('conversions')
+            .insert({
+              tool_id: tool.id,
+              tool_name: tool.name,
+              category: tool.category,
+              input_name:
+                useFiles.length > 0
+                  ? useFiles[0].name
+                  : 'text-input',
+              output_name: '',
+              output_format:
+                tool.outputFormat,
+              status: 'failed',
+              file_size: null,
+            });
+
+        if (insertError) {
+          console.error(
+            'Failed to save failed conversion:',
+            insertError
+          );
+        }
       }
     }
+  };
 
-    setTimeout(() => {
-      setStage('done');
-    }, 300);
-
-  } catch (err: unknown) {
-    console.error(
-      'Conversion error:',
-      err
-    );
-
-    const message =
-      err instanceof Error
-        ? err.message
-        : 'Conversion failed.';
-
-    setError(message);
-    setStage('error');
-
-    /*
-     * REFUND RESERVED CREDIT
-     */
-
-    if (usageReserved) {
-      try {
-        await refundConversion();
-      } catch (refundError) {
-        console.error(
-          'Failed to refund conversion credit:',
-          refundError
-        );
-      }
-    }
-
-    /*
-     * SAVE FAILED HISTORY
-     */
-
-    if (user) {
-      const {
-        error: insertError,
-      } = await supabase
-        .from('conversions')
-        .insert({
-          tool_id: tool.id,
-          tool_name: tool.name,
-          category: tool.category,
-          input_name:
-            useFiles.length > 0
-              ? useFiles[0].name
-              : 'text-input',
-          output_name: '',
-          output_format:
-            tool.outputFormat,
-          status: 'failed',
-          file_size: null,
-        });
-
-      if (insertError) {
-        console.error(
-          'Failed to save failed conversion history:',
-          insertError
-        );
-      }
-    }
-  }
-};
   /*
    * ---------------------------------------------------------
    * FILE HANDLING
    * ---------------------------------------------------------
    */
 
- const handleFiles = useCallback(
-  (files: FileList | File[]) => {
-    const fileArr = Array.from(files);
+  const handleFiles = useCallback(
+    (files: FileList | File[]) => {
+      const fileArr = Array.from(files);
 
-    if (fileArr.length === 0) {
-      return;
-    }
+      if (fileArr.length === 0) {
+        return;
+      }
 
-    setStoredFiles(fileArr);
-    setResults([]);
-    setError(null);
-    setStage('idle');
-    setProgress(0);
+      setStoredFiles(fileArr);
+      setResults([]);
+      setError(null);
+      setStage('idle');
+      setProgress(0);
 
-    // Do not auto-run here. The user must explicitly click Run Conversion.
-    // This prevents accidental conversions and, more importantly, prevents
-    // a file upload + button click from consuming two conversion credits.
-  },
-  [tool]
-);
+      if (
+        tool.inputType === 'file' ||
+        tool.inputType === 'multi-file'
+      ) {
+        void runConversion(fileArr);
+      }
+    },
+    [tool]
+  );
+
   /*
    * ---------------------------------------------------------
    * DOWNLOAD
