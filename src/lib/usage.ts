@@ -1,98 +1,88 @@
+// ============================================================
+// FILE:
+// src/lib/usage.ts
+// REPLACE THE ENTIRE FILE
+// ============================================================
+
 import { supabase } from '@/lib/supabase';
 
-
 export interface UsageStatus {
-
   plan:
     | 'free'
     | 'starter'
     | 'pro'
-    | 'business';
+    | 'business'
+    | 'anonymous';
 
-  free_remaining:
-    number;
+  free_remaining: number;
 
-  unlimited:
-    boolean;
+  unlimited: boolean;
 
-  expires_at:
-    string | null;
+  expires_at: string | null;
 
+  allowed?: boolean;
 }
 
+export interface ConversionReservation {
+  allowed: boolean;
+  unlimited: boolean;
+  remaining: number;
+  plan: string;
+  message?: string;
+}
 
-export async function getUsageStatus() {
-
+export async function getUsageStatus(): Promise<UsageStatus> {
   const {
     data,
     error,
-  } =
-    await supabase.rpc(
-      'get_usage_status'
-    );
-
+  } = await supabase.rpc('get_usage_status');
 
   if (error) {
-
-    throw new Error(
-      error.message
-    );
-
+    throw new Error(error.message);
   }
-
 
   return data as UsageStatus;
-
 }
 
-
-export async function canUseConversion() {
-
+/*
+ * IMPORTANT:
+ *
+ * Do not call canUseConversion() before consumeConversion().
+ *
+ * consumeConversion() is now atomic and performs:
+ *
+ * check -> lock -> reserve
+ *
+ * in one database transaction.
+ */
+export async function consumeConversion(): Promise<ConversionReservation> {
   const {
     data,
     error,
-  } =
-    await supabase.rpc(
-      'can_use_conversion'
-    );
-
+  } = await supabase.rpc('consume_conversion');
 
   if (error) {
-
-    throw new Error(
-      error.message
-    );
-
+    throw new Error(error.message);
   }
 
+  if (!data) {
+    throw new Error(
+      'Unable to reserve a conversion credit.'
+    );
+  }
 
-  return data;
-
+  return data as ConversionReservation;
 }
 
-
-export async function refundConversion() { const { data, error } = await supabase.rpc('refund_conversion'); if(error) throw new Error(error.message); return data; }
-
-export async function consumeConversion() {
-
+export async function refundConversion() {
   const {
     data,
     error,
-  } =
-    await supabase.rpc(
-      'consume_conversion'
-    );
-
+  } = await supabase.rpc('refund_conversion');
 
   if (error) {
-
-    throw new Error(
-      error.message
-    );
-
+    throw new Error(error.message);
   }
 
-
   return data;
-
 }
