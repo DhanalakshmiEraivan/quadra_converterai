@@ -78,128 +78,108 @@ async function serverConvert(
   server: string,
   fields: Record<string, string> = {}
 ): Promise<ConvertResult> {
-  let baseUrl = server.trim().replace(/\/+$/, '');
+  const baseUrl = server.replace(/\/+$/, '');
+  const endpoint = `${baseUrl}/convert`;
 
-  // Accept either the API root or a URL that already ends in /convert.
-  // This prevents accidental requests to /convert/convert.
-  baseUrl = baseUrl.replace(/\/convert$/i, '');
+  if (!file) {
+    throw new Error('Please select a file to convert.');
+  }
 
-  if (!/^https?:\/\//i.test(baseUrl)) {
+  if (!baseUrl) {
     throw new Error(
-      'Invalid VITE_CONVERTER_API_URL. It must point to your QuadraConverter FastAPI conversion server.'
+      'Conversion server URL is missing. Set VITE_CONVERTER_API_URL in your frontend environment.'
     );
   }
 
-  const form =
-    new FormData();
+  const form = new FormData();
 
-  form.append(
-    'file',
-    file,
-    file.name
-  );
+  form.append('file', file, file.name);
+  form.append('operation', operation);
 
-  form.append(
-    'operation',
-    operation
-  );
-
-  Object.entries(fields).forEach(
-    ([key, value]) => {
-      form.append(key, value);
-    }
-  );
-
-  const controller =
-    new AbortController();
-
-  const timeout =
-    window.setTimeout(
-      () => controller.abort(),
-      10 * 60 * 1000
-    );
+  for (const [key, value] of Object.entries(fields)) {
+    form.append(key, value);
+  }
 
   let response: Response;
 
   try {
-    response =
-      await fetch(
-        `${baseUrl}/convert`,
-        {
-          method: 'POST',
-          body: form,
-          signal:
-            controller.signal,
-        }
-      );
+    response = await fetch(endpoint, {
+      method: 'POST',
+      body: form,
+      headers: {
+        Accept: 'application/octet-stream, application/json',
+      },
+    });
   } catch (error) {
-    if (
-      error instanceof DOMException &&
-      error.name === 'AbortError'
-    ) {
-      throw new Error(
-        'The conversion server timed out. Please try a smaller file.'
-      );
-    }
+    console.error('Conversion server fetch failed:', error);
 
     throw new Error(
-      'Cannot connect to the QuadraConverter conversion server. Check VITE_CONVERTER_API_URL and make sure the conversion server is running.'
-    );
-  } finally {
-    window.clearTimeout(
-      timeout
+      `Unable to connect to the conversion server.
+
+Conversion server:
+${baseUrl}
+
+Make sure:
+1. The conversion backend is running.
+2. VITE_CONVERTER_API_URL points to the public backend URL.
+3. The backend uses HTTPS when the frontend uses HTTPS.
+4. CORS allows your frontend domain.
+
+Original error:
+${error instanceof Error ? error.message : 'Failed to fetch'}`
     );
   }
 
   if (!response.ok) {
-    let message =
-      `Conversion server returned HTTP ${response.status}.`;
+    let message = `Conversion server returned HTTP ${response.status}.`;
+
+    const contentType =
+      response.headers.get('content-type') || '';
 
     try {
-      const payload =
-        await response.json();
+      if (contentType.includes('application/json')) {
+        const payload = await response.json();
 
-      message =
-        payload?.detail ||
-        payload?.error ||
-        message;
+        if (typeof payload?.detail === 'string') {
+          message = payload.detail;
+        } else if (typeof payload?.error === 'string') {
+          message = payload.error;
+        } else if (typeof payload?.message === 'string') {
+          message = payload.message;
+        }
+      } else {
+        const text = await response.text();
+
+        if (text.trim()) {
+          message = text.substring(0, 3000);
+        }
+      }
     } catch {
-      // Non-JSON error.
+      // Keep the HTTP status message.
     }
 
     throw new Error(message);
   }
-  const blob =
-    await response.blob();
 
-  if (!blob.size) {
+  const blob = await response.blob();
+
+  if (!blob || blob.size === 0) {
     throw new Error(
       'The conversion server returned an empty file.'
     );
   }
 
   const disposition =
-    response.headers.get(
-      'content-disposition'
-    ) || '';
+    response.headers.get('content-disposition') || '';
 
-  const match = disposition.match(
-    /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i
+  const filenameMatch = disposition.match(
+    /filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i
   );
 
   let filename =
     response.headers.get('x-converted-filename') ||
-    match?.[1] ||
-    match?.[2] ||
+    filenameMatch?.[1] ||
     '';
-
-  if (filename) {
-    try {
-      filename = decodeURIComponent(filename);
-    } catch {
-      // Keep the raw header value when it is not valid URI encoding.
-    }
-  }
 
   if (!filename) {
     const extensionMap: Record<string, string> = {
@@ -211,24 +191,13 @@ async function serverConvert(
       'pdf-to-pdfa': '.pdf',
       'pdf-unlock': '.pdf',
       'pdf-protect': '.pdf',
-      'pdf-translate': '.pdf',
     };
-    filename = file.name.replace(/\.[^.]+$/, '') + (extensionMap[operation] || '.bin');
-  }
 
-  if (!filename) {
-    const extensions: Record<string, string> = {
-      'office-to-pdf': '.pdf',
-      'html-to-pdf': '.pdf',
-      'pdf-to-word': '.docx',
-      'pdf-to-pptx': '.pptx',
-      'pdf-to-xlsx': '.xlsx',
-      'pdf-to-pdfa': '.pdf',
-      'pdf-unlock': '.pdf',
-      'pdf-protect': '.pdf',
-      'pdf-translate': '.pdf',
-    };
-    filename = file.name.replace(/\.[^.]+$/, '') + (extensions[operation] || '.bin');
+    const extension =
+      extensionMap[operation] || '.bin';
+
+    filename =
+      file.name.replace(/\.[^.]+$/, '') + extension;
   }
 
   return {
@@ -239,6 +208,7 @@ async function serverConvert(
       'application/octet-stream',
   };
 }
+
 // ─── Merge PDFs ───
 export async function mergePDFs(files: File[]): Promise<ConvertResult> {
   const merged = await PDFDocument.create();
@@ -512,52 +482,10 @@ export async function pdfToJPG(file: File, quality: number, pageRange?: string):
 }
 
 // ─── PDF to WORD / POWERPOINT / EXCEL ───
-export async function pdfToWord(
-  file: File
-): Promise<ConvertResult> {
-  const server =
-    import.meta.env
-      .VITE_CONVERTER_API_URL;
-
-  if (!server) {
-    throw new Error(
-      'PDF → Word requires VITE_CONVERTER_API_URL.'
-    );
-  }
-
-  return serverConvert(
-    file,
-    'pdf-to-word',
-    server,
-    {
-      language: 'eng',
-    }
-  );
-}
+export async function pdfToWord(file: File): Promise<ConvertResult> { const server=import.meta.env.VITE_CONVERTER_API_URL; if(!server) throw new Error('PDF → Word requires the conversion server.'); return serverConvert(file,'pdf-to-word',server); }
 export async function pdfToPPTX(file: File): Promise<ConvertResult> { const server=import.meta.env.VITE_CONVERTER_API_URL; if(!server) throw new Error('PDF → PowerPoint requires the conversion server.'); return serverConvert(file,'pdf-to-pptx',server); }
+export async function pdfToExcel(file: File): Promise<ConvertResult> { const server=import.meta.env.VITE_CONVERTER_API_URL; if(!server) throw new Error('PDF → Excel requires the conversion server.'); return serverConvert(file,'pdf-to-xlsx',server); }
 
-export async function pdfToExcel(
-  file: File
-): Promise<ConvertResult> {
-  const server =
-    import.meta.env
-      .VITE_CONVERTER_API_URL;
-
-  if (!server) {
-    throw new Error(
-      'PDF → Excel requires VITE_CONVERTER_API_URL.'
-    );
-  }
-
-  return serverConvert(
-    file,
-    'pdf-to-xlsx',
-    server,
-    {
-      language: 'eng',
-    }
-  );
-}
 // ─── PDF to PDF/A (basic) ───
 export async function pdfToPDFA(file: File): Promise<ConvertResult> {
   const server = import.meta.env.VITE_CONVERTER_API_URL;
