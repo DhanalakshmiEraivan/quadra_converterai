@@ -10,5 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY converter_api.py .
 
 ENV CORS_ORIGINS=*
-EXPOSE 8000
-CMD ["uvicorn", "converter_api:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 10000
+CMD ["sh", "-c", "uvicorn converter_api:app --host 0.0.0.0 --port ${PORT:-10000}"]
