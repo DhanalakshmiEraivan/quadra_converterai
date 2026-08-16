@@ -78,8 +78,11 @@ async function serverConvert(
   server: string,
   fields: Record<string, string> = {}
 ): Promise<ConvertResult> {
-  const baseUrl =
-    server.trim().replace(/\/+$/, '');
+  let baseUrl = server.trim().replace(/\/+$/, '');
+
+  // Accept either the API root or a URL that already ends in /convert.
+  // This prevents accidental requests to /convert/convert.
+  baseUrl = baseUrl.replace(/\/convert$/i, '');
 
   if (!/^https?:\/\//i.test(baseUrl)) {
     throw new Error(
@@ -180,26 +183,53 @@ async function serverConvert(
       'content-disposition'
     ) || '';
 
-  const match =
-    disposition.match(
-      /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i
-    );
+  const match = disposition.match(
+    /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i
+  );
 
-  const filename =
-    response.headers.get(
-      'x-converted-filename'
-    ) ||
-    (
-      match?.[1]
-        ? decodeURIComponent(
-            match[1]
-          )
-        : null
-    ) ||
-    file.name.replace(
-      /\.[^.]+$/,
-      '.converted'
-    );
+  let filename =
+    response.headers.get('x-converted-filename') ||
+    match?.[1] ||
+    match?.[2] ||
+    '';
+
+  if (filename) {
+    try {
+      filename = decodeURIComponent(filename);
+    } catch {
+      // Keep the raw header value when it is not valid URI encoding.
+    }
+  }
+
+  if (!filename) {
+    const extensionMap: Record<string, string> = {
+      'office-to-pdf': '.pdf',
+      'html-to-pdf': '.pdf',
+      'pdf-to-word': '.docx',
+      'pdf-to-pptx': '.pptx',
+      'pdf-to-xlsx': '.xlsx',
+      'pdf-to-pdfa': '.pdf',
+      'pdf-unlock': '.pdf',
+      'pdf-protect': '.pdf',
+      'pdf-translate': '.pdf',
+    };
+    filename = file.name.replace(/\.[^.]+$/, '') + (extensionMap[operation] || '.bin');
+  }
+
+  if (!filename) {
+    const extensions: Record<string, string> = {
+      'office-to-pdf': '.pdf',
+      'html-to-pdf': '.pdf',
+      'pdf-to-word': '.docx',
+      'pdf-to-pptx': '.pptx',
+      'pdf-to-xlsx': '.xlsx',
+      'pdf-to-pdfa': '.pdf',
+      'pdf-unlock': '.pdf',
+      'pdf-protect': '.pdf',
+      'pdf-translate': '.pdf',
+    };
+    filename = file.name.replace(/\.[^.]+$/, '') + (extensions[operation] || '.bin');
+  }
 
   return {
     blob,
